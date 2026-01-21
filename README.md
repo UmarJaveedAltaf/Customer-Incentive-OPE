@@ -26,14 +26,16 @@ The system combines multiple OPE estimators with bootstrap confidence intervals,
 
 ## Dashboard Demo Scenarios
 
-The screenshots below illustrate how the dashboard supports **realistic deployment decisions** under different safety constraints.
+The screenshots below illustrate how the dashboard supports **realistic deployment decisions**
+under different safety constraints.
 
 ---
 
 ## Scenario 1: Deployment PASS (Happy Path)
 
 **Description**  
-The target policy safely outperforms the baseline. The DR lower confidence bound clears the safety gate, enabling deployment.
+The target policy safely outperforms the baseline. The DR lower confidence bound clears the safety gate,
+enabling deployment.
 
 **Inputs**
 - Baseline return: `0`
@@ -46,20 +48,26 @@ The target policy safely outperforms the baseline. The DR lower confidence bound
 
 ### Screenshots
 
-<p align="center">
-  <img src="images/ope_pass_overview.png" width="85%">
-</p>
-
-<p align="center">
-  <img src="images/ope_pass_segments.png" width="85%">
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <img src="images/ope_pass_overview.png" width="100%">
+      <br><b>Overall OPE & Deployment PASS</b>
+    </td>
+    <td align="center">
+      <img src="images/ope_pass_segments.png" width="100%">
+      <br><b>Segment-wise Confidence Intervals</b>
+    </td>
+  </tr>
+</table>
 
 ---
 
 ## Scenario 2: Conservative Safety Gate (Deployment HOLD)
 
 **Description**  
-A strict baseline and safety margin prevent deployment even though point estimates are strong. This demonstrates conservative offline safety checks.
+A strict baseline and safety margin prevent deployment even though point estimates are strong.
+This demonstrates conservative offline safety checks.
 
 **Inputs**
 - Baseline return: `150`
@@ -73,20 +81,26 @@ A strict baseline and safety margin prevent deployment even though point estimat
 
 ### Screenshots
 
-<p align="center">
-  <img src="images/ope_hold_overview.png" width="85%">
-</p>
-
-<p align="center">
-  <img src="images/ope_hold_cql.png" width="85%">
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <img src="images/ope_hold_overview.png" width="100%">
+      <br><b>Deployment HOLD — Safety Gate Triggered</b>
+    </td>
+    <td align="center">
+      <img src="images/ope_hold_cql.png" width="100%">
+      <br><b>CQL vs OPE DR Comparison</b>
+    </td>
+  </tr>
+</table>
 
 ---
 
 ## Scenario 3: Segment-wise Decision Making (Partial Rollout)
 
 **Description**  
-Different customer segments receive different rollout recommendations based on segment-level DR confidence intervals.
+Different customer segments receive different rollout recommendations based on
+segment-level DR confidence intervals.
 
 **Inputs**
 - Baseline return: `150`
@@ -103,15 +117,21 @@ This demonstrates **incremental, risk-aware deployment**.
 
 ### Screenshots
 
-<p align="center">
-  <img src="images/ope_segment_decisions.png" width="85%">
-</p>
-
-<p align="center">
-  <img src="images/ope_partial_rollout.png" width="85%">
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <img src="images/ope_segment_decisions.png" width="100%">
+      <br><b>Segment-level Confidence & Gate Decisions</b>
+    </td>
+    <td align="center">
+      <img src="images/ope_partial_rollout.png" width="100%">
+      <br><b>Partial Rollout Recommendations</b>
+    </td>
+  </tr>
+</table>
 
 ---
+
 
 ## Why This Dashboard Matters
 
