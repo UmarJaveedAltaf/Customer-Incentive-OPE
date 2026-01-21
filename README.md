@@ -1,0 +1,145 @@
+# Off-Policy Evaluation (OPE) Dashboard
+
+![Python](https://img.shields.io/badge/Python-3.9+-blue)
+![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)
+![Offline%20RL](https://img.shields.io/badge/Reinforcement%20Learning-Offline%20RL-purple)
+![Status](https://img.shields.io/badge/Status-Production%20Ready-success)
+
+A production-oriented **Off-Policy Evaluation (OPE) dashboard** for safely validating reinforcement learning policies before deployment.  
+The system combines multiple OPE estimators with bootstrap confidence intervals, conservative policy gating, segment-wise analysis, and optional Conservative Q-Learning (CQL) comparison.
+
+---
+
+## Key Capabilities
+
+- Importance Sampling (IPS)
+- Weighted Importance Sampling (WIS)
+- Direct Method (DM)
+- Doubly Robust (DR)
+- Bootstrap confidence intervals
+- Conservative policy gate (baseline + safety margin)
+- Segment-wise rollout decisions
+- Optional CQL baseline comparison
+- Interactive Streamlit dashboard
+
+---
+
+## Dashboard Demo Scenarios
+
+The screenshots below illustrate how the dashboard supports **realistic deployment decisions** under different safety constraints.
+
+---
+
+## Scenario 1: Deployment PASS (Happy Path)
+
+**Description**  
+The target policy safely outperforms the baseline. The DR lower confidence bound clears the safety gate, enabling deployment.
+
+**Inputs**
+- Baseline return: `0`
+- Safety margin: `0`
+- CQL comparison: Disabled
+
+**Outcome**
+- Deployment decision: **PASS**
+- All segments eligible for rollout
+
+### Screenshots
+
+<p align="center">
+  <img src="images/ope_pass_overview.png" width="85%">
+</p>
+
+<p align="center">
+  <img src="images/ope_pass_segments.png" width="85%">
+</p>
+
+---
+
+## Scenario 2: Conservative Safety Gate (Deployment HOLD)
+
+**Description**  
+A strict baseline and safety margin prevent deployment even though point estimates are strong. This demonstrates conservative offline safety checks.
+
+**Inputs**
+- Baseline return: `150`
+- Safety margin: `800`
+- CQL comparison: Enabled
+- CQL score: `800`
+
+**Outcome**
+- Deployment decision: **HOLD**
+- Conservative baseline remains safer than policy
+
+### Screenshots
+
+<p align="center">
+  <img src="images/ope_hold_overview.png" width="85%">
+</p>
+
+<p align="center">
+  <img src="images/ope_hold_cql.png" width="85%">
+</p>
+
+---
+
+## Scenario 3: Segment-wise Decision Making (Partial Rollout)
+
+**Description**  
+Different customer segments receive different rollout recommendations based on segment-level DR confidence intervals.
+
+**Inputs**
+- Baseline return: `150`
+- Safety margin: `0`
+- CQL comparison: Enabled
+- CQL score: `800`
+
+**Outcome**
+- Low segment: HOLD (0%)
+- Medium segment: PASS (25%)
+- High segment: PASS (25%)
+
+This demonstrates **incremental, risk-aware deployment**.
+
+### Screenshots
+
+<p align="center">
+  <img src="images/ope_segment_decisions.png" width="85%">
+</p>
+
+<p align="center">
+  <img src="images/ope_partial_rollout.png" width="85%">
+</p>
+
+---
+
+## Why This Dashboard Matters
+
+Offline reinforcement learning is inherently risky. This project demonstrates how to:
+
+- Avoid unsafe online experimentation
+- Use statistically grounded confidence intervals
+- Enforce conservative deployment gates
+- Compare learned policies against strong offline baselines
+- Enable partial rollouts instead of binary decisions
+
+This mirrors evaluation workflows used in real-world reinforcement learning systems such as recommendation engines, incentives, pricing, and control.
+
+---
+
+## Project Structure
+
+```text
+customer-incentive-dqn/
+├── analysis_ope.py              # OPE estimators + bootstrap + policy gate
+├── dashboard_ope.py             # Streamlit dashboard
+├── data/
+│   └── logged_behavior.npz      # Logged offline trajectories
+├── images/
+│   ├── ope_pass_overview.png
+│   ├── ope_pass_segments.png
+│   ├── ope_hold_overview.png
+│   ├── ope_hold_cql.png
+│   ├── ope_segment_decisions.png
+│   └── ope_partial_rollout.png
+└── README.md

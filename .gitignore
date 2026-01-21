@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.env
+
+# Data & artifacts
+data/*.npz
+*.pth
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Jupyter
+.ipynb_checkpoints/
