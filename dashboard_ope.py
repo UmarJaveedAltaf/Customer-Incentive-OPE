@@ -27,27 +27,55 @@ def ci_bar_plot(ci_dict, baseline=0.0, cql_score=None):
         [e - l for e, l in zip(est, lo)],
         [h - e for e, h in zip(est, hi)],
     ]
-    fig = plt.figure(**PLOT_KW)
-    plt.errorbar(segs, est, yerr=yerr, fmt="o", capsize=4, linewidth=1.2, markersize=6)
-    plt.axhline(baseline, linestyle="--", linewidth=1.2, label="Baseline")
+
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(**PLOT_KW)
+    fig.patch.set_facecolor('#080812')
+    ax.set_facecolor('#0d0d1a')
+
+    ax.errorbar(segs, est, yerr=yerr, fmt="o", capsize=4, linewidth=1.2,
+                markersize=6, color='#06B6D4', ecolor='#06B6D4')
+    ax.axhline(baseline, linestyle="--", linewidth=1.2, color='#EF4444', label="Baseline")
     if cql_score is not None:
-        plt.axhline(cql_score, linestyle="--", linewidth=1.2, label="CQL")
-    plt.title("Segment-wise DR (95% CI)")
-    plt.ylabel("Estimated Return")
-    plt.xlabel("Segment")
-    plt.legend()
+        ax.axhline(cql_score, linestyle="--", linewidth=1.2, color='#7C3AED', label="CQL")
+
+    ax.set_title("Segment-wise DR (95% CI)", color='white')
+    ax.set_ylabel("Estimated Return", color='white')
+    ax.set_xlabel("Segment", color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#ffffff26')
+    ax.grid(color='#ffffff', alpha=0.06, linewidth=0.6)
+
+    legend = ax.legend(facecolor='#0d0d1a', edgecolor='#ffffff26', labelcolor='white')
     plt.tight_layout()
     return fig
 
 
 def dist_plot(overall_samples):
-    fig = plt.figure(figsize=(4.0, 2.5), dpi=50)
-    for name, samples in overall_samples.items():
-        plt.hist(samples, bins=25, alpha=0.5, label=name)
-    plt.title("OPE Distribution (Episode-level)")
-    plt.xlabel("Return")
-    plt.ylabel("Count")
-    plt.legend()
+    _HIST_COLORS = ['#7C3AED', '#06B6D4', '#10B981', '#3B82F6']
+
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(4.0, 2.5), dpi=50)
+    fig.patch.set_facecolor('#080812')
+    ax.set_facecolor('#0d0d1a')
+
+    for (name, samples), color in zip(overall_samples.items(), _HIST_COLORS):
+        ax.hist(samples, bins=25, alpha=0.55, label=name, color=color)
+
+    ax.set_title("OPE Distribution (Episode-level)", color='white')
+    ax.set_xlabel("Return", color='white')
+    ax.set_ylabel("Count", color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#ffffff26')
+    ax.grid(color='#ffffff', alpha=0.06, linewidth=0.6)
+
+    ax.legend(facecolor='#0d0d1a', edgecolor='#ffffff26', labelcolor='white')
     plt.tight_layout()
     return fig
 
