@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 from analysis_ope import run_ope
 
@@ -393,7 +394,7 @@ if page == "Business Simulator":
 
     st.markdown("---")
 
-    # ── segment CI chart ──────────────────────────────────────────────
+    # ── segment CI chart (cyberpunk Plotly) ──────────────────────────
     st.subheader("Segment-level DR — Confidence Intervals")
 
     seg_names = list(sim["seg_ci"].keys())
@@ -401,20 +402,92 @@ if page == "Business Simulator":
     seg_lo    = [sim["seg_ci"][s]["ci_low"]   for s in seg_names]
     seg_hi    = [sim["seg_ci"][s]["ci_high"]  for s in seg_names]
     seg_bases = [sim["seg_ci"][s]["baseline"] for s in seg_names]
-    yerr = [
-        [e - l for e, l in zip(seg_est, seg_lo)],
-        [h - e for e, h in zip(seg_est, seg_hi)],
-    ]
-    fig, ax = plt.subplots(figsize=(6, 3), dpi=60)
-    ax.errorbar(seg_names, seg_est, yerr=yerr,
-                fmt="o", capsize=5, linewidth=1.5, markersize=8, color="#4A90E2")
-    for base in seg_bases:
-        ax.axhline(base, linestyle="--", linewidth=0.9, alpha=0.5, color="#aaa")
-    ax.set_title("Segment DR vs Baseline (95% CI)", fontsize=10)
-    ax.set_ylabel("Estimated Return")
-    ax.set_xlabel("Customer Segment")
-    plt.tight_layout()
-    st.pyplot(fig, clear_figure=True, use_container_width=False)
+
+    _NEON = ["#00ff41", "#00d4ff", "#bf00ff"]
+
+    cyb_fig = go.Figure()
+
+    for i, (seg, est, lo, hi) in enumerate(zip(seg_names, seg_est, seg_lo, seg_hi)):
+        color = _NEON[i % len(_NEON)]
+        err_minus = est - lo
+        err_plus  = hi - est
+
+        cyb_fig.add_trace(go.Scatter(
+            x=[seg],
+            y=[est],
+            mode="markers",
+            name=seg,
+            marker=dict(
+                size=14,
+                color=color,
+                line=dict(color=color, width=2),
+            ),
+            error_y=dict(
+                type="data",
+                symmetric=False,
+                array=[err_plus],
+                arrayminus=[err_minus],
+                color=color,
+                thickness=1.5,
+                width=6,
+            ),
+            showlegend=True,
+        ))
+
+    # per-segment baseline dashed lines
+    for i, (seg, base) in enumerate(zip(seg_names, seg_bases)):
+        color = _NEON[i % len(_NEON)]
+        cyb_fig.add_shape(
+            type="line",
+            x0=-0.4 + i, x1=0.4 + i,
+            y0=base, y1=base,
+            line=dict(color="#ff4444", width=1.5, dash="dash"),
+        )
+
+    # global baseline annotation (single red dashed rule if all equal)
+    if len(set(seg_bases)) == 1:
+        cyb_fig.add_hline(
+            y=seg_bases[0],
+            line=dict(color="#ff4444", width=1.5, dash="dash"),
+            annotation_text="baseline",
+            annotation_font_color="#ff4444",
+        )
+
+    cyb_fig.update_layout(
+        title=dict(
+            text="Segment DR vs Baseline (95% CI)",
+            font=dict(color="white", size=15),
+            x=0.5,
+            xanchor="center",
+        ),
+        paper_bgcolor="#0a0a0f",
+        plot_bgcolor="#0a0a0f",
+        font=dict(color="white"),
+        xaxis=dict(
+            title="Customer Segment",
+            title_font=dict(color="white"),
+            tickfont=dict(color="white"),
+            gridcolor="#ffffff10",
+            zeroline=False,
+            showline=False,
+        ),
+        yaxis=dict(
+            title="Estimated Return",
+            title_font=dict(color="white"),
+            tickfont=dict(color="white"),
+            gridcolor="#ffffff10",
+            zeroline=False,
+            showline=False,
+        ),
+        legend=dict(
+            font=dict(color="white"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        margin=dict(l=60, r=20, t=50, b=50),
+        height=380,
+    )
+
+    st.plotly_chart(cyb_fig, use_container_width=True)
 
     st.markdown("---")
 

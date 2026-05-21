@@ -4,3 +4,4 @@ torch==2.2.2
 matplotlib==3.8.3
 tqdm==4.66.2
 pandas==2.2.1
+plotly>=5.18.0
