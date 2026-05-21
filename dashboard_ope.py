@@ -1,4 +1,5 @@
 # dashboard_ope.py
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -19,22 +20,17 @@ PLOT_KW = dict(figsize=(4.0, 2.5), dpi=50)
 def ci_bar_plot(ci_dict, baseline=0.0, cql_score=None):
     segs = list(ci_dict.keys())
     est = [ci_dict[s]["estimate"] for s in segs]
-    lo = [ci_dict[s]["ci_low"] for s in segs]
-    hi = [ci_dict[s]["ci_high"] for s in segs]
+    lo  = [ci_dict[s]["ci_low"]  for s in segs]
+    hi  = [ci_dict[s]["ci_high"] for s in segs]
     yerr = [
         [e - l for e, l in zip(est, lo)],
         [h - e for e, h in zip(est, hi)],
     ]
-
     fig = plt.figure(**PLOT_KW)
-    plt.errorbar(
-        segs, est, yerr=yerr,
-        fmt="o", capsize=4, linewidth=1.2, markersize=6
-    )
+    plt.errorbar(segs, est, yerr=yerr, fmt="o", capsize=4, linewidth=1.2, markersize=6)
     plt.axhline(baseline, linestyle="--", linewidth=1.2, label="Baseline")
     if cql_score is not None:
         plt.axhline(cql_score, linestyle="--", linewidth=1.2, label="CQL")
-
     plt.title("Segment-wise DR (95% CI)")
     plt.ylabel("Estimated Return")
     plt.xlabel("Segment")
@@ -47,7 +43,6 @@ def dist_plot(overall_samples):
     fig = plt.figure(figsize=(4.0, 2.5), dpi=50)
     for name, samples in overall_samples.items():
         plt.hist(samples, bins=25, alpha=0.5, label=name)
-
     plt.title("OPE Distribution (Episode-level)")
     plt.xlabel("Return")
     plt.ylabel("Count")
@@ -57,173 +52,533 @@ def dist_plot(overall_samples):
 
 
 # =============================
-# Page config
+# Page config  (must be first)
 # =============================
-st.set_page_config(
-    page_title="OPE Dashboard",
-    layout="wide",
-    page_icon="📊"
-)
+st.set_page_config(page_title="OPE Dashboard", layout="wide", page_icon="📊")
 
-st.title("📊 Off-Policy Evaluation (OPE) Dashboard")
-st.caption("IPS · WIS · DM · DR · Bootstrap CI · Policy Gate")
-
-st.markdown("---")
+# ── top-level navigation ──────────────────────────────────────────────────────
+page = st.sidebar.radio("Navigation", ["Business Simulator", "OPE Dashboard"])
+st.sidebar.markdown("---")
 
 
-# =============================
-# Sidebar
-# =============================
-with st.sidebar:
-    st.header("📥 Inputs")
-    log_path = st.text_input("Logged data (.npz)", "data/logged_behavior.npz")
-    model_path = st.text_input("Target policy (.pth)", "dqn_policy.pth")
+# ==============================================================================
+# BUSINESS SIMULATOR
+# ==============================================================================
 
-    st.header("⚙️ OPE Settings")
-    n_boot = st.slider("Bootstrap samples", 200, 2000, 800, step=100)
-    clip_rho = st.slider("Importance weight clip (ρ)", 5.0, 200.0, 50.0, step=5.0)
+# ── scenario definitions ──────────────────────────────────────────────────────
+_SCENARIOS = {
+    "E-commerce Dynamic Pricing": {
+        "icon": "🛒",
+        "company_type": "Online Retailer (Amazon-style)",
+        "rl_controls": "Product pricing across thousands of SKUs in real-time",
+        "deploy_means": "Replace static price rules with an ML-driven pricing engine",
+        "base_revenue": 15_000_000,
+        "new_return": 80.0,
+        "baseline_return": -50.0,
+        "improvement_pct": 0.15,
+        "segments": ["Budget Shoppers", "Mainstream", "Premium"],
+        "seg_new":      [30.0, 75.0, 110.0],
+        "seg_baseline": [-20.0, -50.0, -80.0],
+        "accent": "#FF9900",
+    },
+    "Recommendation Engine": {
+        "icon": "🎬",
+        "company_type": "Streaming Platform (Netflix / Spotify-style)",
+        "rl_controls": "Content recommendations per session to maximise watch-time",
+        "deploy_means": "Upgrade collaborative filtering to an RL recommendation policy",
+        "base_revenue": 8_000_000,
+        "new_return": 55.0,
+        "baseline_return": -30.0,
+        "improvement_pct": 0.12,
+        "segments": ["Casual Viewers", "Regular", "Power Users"],
+        "seg_new":      [20.0, 50.0, 90.0],
+        "seg_baseline": [-15.0, -30.0, -45.0],
+        "accent": "#E50914",
+    },
+    "Customer Incentives": {
+        "icon": "🎁",
+        "company_type": "Retail / Loyalty Platform",
+        "rl_controls": "Discount and coupon targeting per customer segment",
+        "deploy_means": "Replace blanket discounts with personalised incentive allocation",
+        "base_revenue": 5_000_000,
+        "new_return": 95.0,
+        "baseline_return": 0.0,
+        "improvement_pct": 0.18,
+        "segments": ["Low Value", "Medium Value", "High Value"],
+        "seg_new":      [40.0, 90.0, 140.0],
+        "seg_baseline": [0.0, 0.0, 0.0],
+        "accent": "#00A651",
+    },
+}
 
-    st.header("🚦 Policy Gate")
-    baseline = st.number_input("Baseline return", value=0.0, step=10.0)
-    margin = st.number_input("Safety margin", value=0.0, step=10.0)
 
-    st.header("🧪 CQL Overlay")
-    use_cql = st.checkbox("Compare against CQL", value=False)
-    cql_score = st.number_input("CQL score", value=0.0, step=10.0) if use_cql else None
+def _run_sim(scenario_key: str, budget: int, risk_tolerance: str, days: int):
+    """Generate synthetic but realistic OPE outputs for the Business Simulator."""
+    sc  = _SCENARIOS[scenario_key]
+    rng = np.random.default_rng(42)
 
-    run_btn = st.button("🚀 Run OPE")
+    noise = {"Conservative": 0.05, "Balanced": 0.12, "Aggressive": 0.22}[risk_tolerance]
+    n = max(60, budget // 2_000)
+
+    # overall DR for the new policy
+    dr_samples = rng.normal(loc=sc["new_return"],
+                            scale=abs(sc["new_return"]) * noise + 10,
+                            size=n)
+    dr_mean = float(dr_samples.mean())
+    boots   = [rng.choice(dr_samples, size=n, replace=True).mean() for _ in range(600)]
+    ci_low  = float(np.percentile(boots, 2.5))
+    ci_high = float(np.percentile(boots, 97.5))
+
+    # per-segment DR
+    seg_ci = {}
+    for i, seg in enumerate(sc["segments"]):
+        s_samp  = rng.normal(loc=sc["seg_new"][i],
+                             scale=abs(sc["seg_new"][i]) * noise + 8,
+                             size=max(20, n // 3))
+        s_boots = [rng.choice(s_samp, size=len(s_samp), replace=True).mean()
+                   for _ in range(300)]
+        seg_ci[seg] = {
+            "estimate": float(s_samp.mean()),
+            "ci_low":   float(np.percentile(s_boots, 2.5)),
+            "ci_high":  float(np.percentile(s_boots, 97.5)),
+            "baseline": sc["seg_baseline"][i],
+        }
+
+    gate_pass      = ci_low >= sc["baseline_return"]
+    ci_width       = ci_high - ci_low
+    improvement    = max(0.0, (dr_mean - sc["baseline_return"]) /
+                         (abs(sc["baseline_return"]) + 1e-8))
+    revenue_impact = sc["base_revenue"] * sc["improvement_pct"] * (days / 90) * (budget / 500_000)
+    confidence     = max(50.0, min(99.0,
+                         100.0 * (1.0 - ci_width / (abs(dr_mean) * 2 + 1e-8))))
+    segs_pass      = sum(1 for v in seg_ci.values() if v["ci_low"] >= v["baseline"])
+
+    if ci_low >= sc["baseline_return"] + 20 and noise <= 0.12:
+        risk_label, risk_color = "LOW",    "#00A651"
+    elif gate_pass:
+        risk_label, risk_color = "MEDIUM", "#FF9900"
+    else:
+        risk_label, risk_color = "HIGH",   "#E50914"
+
+    return {
+        "dr_mean": dr_mean, "ci_low": ci_low, "ci_high": ci_high,
+        "ci_width": ci_width, "baseline": sc["baseline_return"],
+        "revenue_impact": revenue_impact, "confidence": confidence,
+        "gate_pass": gate_pass, "risk_label": risk_label, "risk_color": risk_color,
+        "improvement_pct": improvement, "seg_ci": seg_ci,
+        "segs_pass": segs_pass, "n_segs": len(sc["segments"]), "days": days,
+    }
 
 
-# =============================
-# Cached execution
-# =============================
-@st.cache_data(show_spinner=False)
-def cached_run(log_path, model_path, n_boot, baseline, margin, clip_rho):
-    return run_ope(
-        log_path=log_path,
-        model_path=model_path,
-        n_boot=n_boot,
-        baseline=baseline,
-        margin=margin,
-        clip_rho=clip_rho,
-        quiet=True,
+def _fmt_revenue(v: float) -> str:
+    return f"${v / 1_000_000:.1f}M" if v >= 1_000_000 else f"${v:,.0f}"
+
+
+def _plain_english(sim: dict, sc_key: str) -> str:
+    sc       = _SCENARIOS[sc_key]
+    decision = "RECOMMENDED" if sim["gate_pass"] else "NOT RECOMMENDED"
+    rev      = _fmt_revenue(sim["revenue_impact"])
+    impr     = sim["improvement_pct"] * 100
+    return (
+        f"Based on the Off-Policy Evaluation (OPE) analysis, deploying the new "
+        f"**{sc_key.lower()}** policy is **{decision}**. "
+        f"The model estimates a **{impr:.0f}% performance improvement** with "
+        f"**{sim['confidence']:.0f}% confidence**, representing approximately "
+        f"**{rev} in additional revenue** over {sim['days']} days. "
+        f"Risk is **{sim['risk_label']}** — the policy outperforms the baseline "
+        f"in **{sim['segs_pass']} of {sim['n_segs']}** customer segments."
     )
 
 
-# =============================
-# Main execution
-# =============================
-if run_btn:
-    with st.spinner("Running off-policy evaluation…"):
-        results = cached_run(log_path, model_path, n_boot, baseline, margin, clip_rho)
-
-    overall = results["overall"]
-    seg_ci = results["segment"]
-    rollout = results["rollout"]
-
-    # =============================
-    # 🔔 Deployment Decision Badge
-    # =============================
-    dr = overall["DR"]
-    deploy_pass = dr["ci_low"] >= baseline + margin
-
-    if deploy_pass:
-        st.success("✅ **Deployment decision: PASS** — DR lower bound clears safety gate.")
-    else:
-        st.error("⛔ **Deployment decision: HOLD** — DR lower bound below safety gate.")
-
-    st.markdown("---")
-
-    # =============================
-    # 📌 Key Metrics
-    # =============================
-    st.subheader("📌 Overall OPE Estimates")
-
-    cols = st.columns(4)
-    for col, key in zip(cols, ["IPS", "WIS", "DM", "DR"]):
-        v = overall[key]
-        col.metric(
-            label=key,
-            value=f"{v['estimate']:.2f}",
-            delta=f"[{v['ci_low']:.2f}, {v['ci_high']:.2f}]"
+def _export_text(sim: dict, sc_key: str, budget: int, risk_tolerance: str) -> str:
+    sc = _SCENARIOS[sc_key]
+    rev = _fmt_revenue(sim["revenue_impact"])
+    lines = [
+        "=" * 62,
+        "EXECUTIVE SUMMARY — OPE BUSINESS SIMULATION",
+        "=" * 62,
+        f"Scenario         : {sc_key}",
+        f"Company Type     : {sc['company_type']}",
+        f"RL Controls      : {sc['rl_controls']}",
+        f"Deployment Means : {sc['deploy_means']}",
+        "",
+        "SIMULATION PARAMETERS",
+        f"  Budget at Risk  : ${budget:,}",
+        f"  Risk Tolerance  : {risk_tolerance}",
+        f"  Time Horizon    : {sim['days']} days",
+        "",
+        "BUSINESS OUTCOMES",
+        f"  Revenue Impact      : +{rev}",
+        f"  Risk Score          : {sim['risk_label']}",
+        f"  Deployment Decision : {'DEPLOY' if sim['gate_pass'] else 'HOLD'}",
+        f"  Confidence Level    : {sim['confidence']:.1f}%",
+        "",
+        "OPE TECHNICAL METRICS",
+        f"  DR Estimate : {sim['dr_mean']:.2f}",
+        f"  95% CI      : [{sim['ci_low']:.2f}, {sim['ci_high']:.2f}]",
+        f"  Baseline    : {sim['baseline']:.2f}",
+        f"  Improvement : {sim['improvement_pct'] * 100:.1f}%",
+        "",
+        "SEGMENT BREAKDOWN",
+    ]
+    for seg, v in sim["seg_ci"].items():
+        gate = "PASS" if v["ci_low"] >= v["baseline"] else "HOLD"
+        lines.append(
+            f"  {seg:<22} DR={v['estimate']:.1f}  "
+            f"CI=[{v['ci_low']:.1f}, {v['ci_high']:.1f}]  {gate}"
         )
+    summary = _plain_english(sim, sc_key).replace("**", "")
+    lines += ["", "PLAIN-ENGLISH SUMMARY", summary, "",
+              "=" * 62, "Generated by OPE Dashboard — Business Simulator", "=" * 62]
+    return "\n".join(lines)
 
+
+if page == "Business Simulator":
+    st.title("Business Simulator")
     st.caption(
-        f"Episodes={results['meta']['episodes']} · "
-        f"ρ_clip={results['meta']['clip_rho']} · "
-        f"baseline={baseline} · margin={margin}"
+        "Translate Off-Policy Evaluation results into business outcomes — "
+        "designed for non-technical stakeholders."
     )
-
     st.markdown("---")
 
-    # =============================
-    # 📊 Segment CI Comparison
-    # =============================
-    st.subheader("📊 Segment-wise Confidence Intervals")
-    st.pyplot(
-        ci_bar_plot(seg_ci, baseline, cql_score),
-        clear_figure=True,
-        use_container_width=False
-    )
+    # ── sidebar controls ──────────────────────────────────────────────
+    with st.sidebar:
+        st.header("Simulation Controls")
+        sc_keys   = list(_SCENARIOS.keys())
+        scenario  = st.selectbox("Scenario", sc_keys, index=2)
+        budget    = st.slider("Budget at Risk ($)", 10_000, 1_000_000, 250_000,
+                              step=10_000, format="$%d")
+        risk_tol  = st.radio("Risk Tolerance",
+                             ["Conservative", "Balanced", "Aggressive"], index=1)
+        time_days = st.select_slider("Time Horizon (days)", [30, 60, 90], value=90)
 
-    st.markdown("---")
+    sc  = _SCENARIOS[scenario]
+    sim = _run_sim(scenario, budget, risk_tol, time_days)
 
-    # =============================
-    # 🧭 Partial Rollout Guidance
-    # =============================
-    st.subheader("🧭 Partial Rollout Recommendations")
-
-    rows = []
-    for seg in seg_ci:
-        rows.append({
-            "Segment": seg,
-            "DR Mean": seg_ci[seg]["estimate"],
-            "CI Low": seg_ci[seg]["ci_low"],
-            "CI High": seg_ci[seg]["ci_high"],
-            "Gate": "PASS" if seg_ci[seg]["ci_low"] >= baseline + margin else "HOLD",
-            "Suggested Rollout": rollout[seg]["rollout"],
-        })
-
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    st.info("Gate rule: **PASS if CI_low ≥ baseline + margin**")
-
-    st.markdown("---")
-
-    # =============================
-    # 📈 Sample Distributions
-    # =============================
-    st.subheader("📈 OPE Sample Distributions")
-    st.pyplot(
-        dist_plot({
-            "IPS": overall["IPS"]["samples"],
-            "WIS": overall["WIS"]["samples"],
-            "DM": overall["DM"]["samples"],
-            "DR": overall["DR"]["samples"],
-        }),
-        clear_figure=True,
-        use_container_width=False
-    )
-
-    st.markdown("---")
-
-    # =============================
-    # 🧪 CQL vs DR
-    # =============================
-    st.subheader("🧪 CQL vs OPE DR")
-
-    if use_cql:
-        st.write(
-            f"**CQL score:** {cql_score:.2f}\n\n"
-            f"**OPE DR:** {dr['estimate']:.2f} "
-            f"(CI [{dr['ci_low']:.2f}, {dr['ci_high']:.2f}])"
+    # ── scenario selector cards ───────────────────────────────────────
+    st.subheader("Scenario")
+    col1, col2, col3 = st.columns(3)
+    for col, key in zip([col1, col2, col3], sc_keys):
+        s       = _SCENARIOS[key]
+        active  = key == scenario
+        border  = f"3px solid {s['accent']}" if active else "1px solid #444"
+        bg      = "#1a1a2e"                  if active else "#111"
+        col.markdown(
+            f"""<div style="border:{border};border-radius:10px;padding:16px;
+                background:{bg};min-height:150px;">
+              <span style="font-size:1.8rem">{s['icon']}</span>
+              <div style="font-weight:700;margin-top:4px">{key}</div>
+              <div style="font-size:0.78rem;color:#aaa;margin-top:6px">
+                <b>Company:</b> {s['company_type']}<br>
+                <b>RL controls:</b> {s['rl_controls']}<br>
+                <b>Deploying means:</b> {s['deploy_means']}
+              </div>
+            </div>""",
+            unsafe_allow_html=True,
         )
 
-        if dr["ci_low"] > cql_score:
-            st.success("DR lower bound exceeds CQL → policy stronger than conservative offline baseline.")
-        else:
-            st.warning("DR lower bound below CQL → conservative baseline still safer.")
-    else:
-        st.info("Enable CQL overlay to compare conservative offline baseline.")
+    st.markdown("---")
 
-else:
-    st.info("⬅️ Configure inputs and click **Run OPE**.")
+    # ── 4 hero metric cards ───────────────────────────────────────────
+    st.subheader(f"{sc['icon']}  Business Outcomes — {scenario}")
+    c1, c2, c3, c4 = st.columns(4)
+
+    deploy_color = "#00A651" if sim["gate_pass"] else "#E50914"
+    deploy_label = "DEPLOY"  if sim["gate_pass"] else "HOLD"
+
+    def _hero(col, label, value, subtitle, accent):
+        col.markdown(
+            f"""<div style="background:#1e1e2e;border-radius:10px;padding:20px;
+                text-align:center;border-left:5px solid {accent};">
+              <div style="font-size:0.8rem;color:#aaa;text-transform:uppercase">
+                {label}
+              </div>
+              <div style="font-size:2rem;font-weight:800;color:{accent};margin-top:6px">
+                {value}
+              </div>
+              <div style="font-size:0.75rem;color:#666;margin-top:4px">{subtitle}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    _hero(c1, "Revenue Impact",
+          f"+{_fmt_revenue(sim['revenue_impact'])}",
+          f"over {time_days} days", "#00A651")
+    _hero(c2, "Risk Score",
+          sim["risk_label"],
+          f"DR CI low: {sim['ci_low']:.1f}", sim["risk_color"])
+    _hero(c3, "Deployment Decision",
+          deploy_label,
+          "policy gate result", deploy_color)
+    _hero(c4, "Confidence Level",
+          f"{sim['confidence']:.0f}%",
+          f"CI width: {sim['ci_width']:.1f}", "#4A90E2")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ── before vs after comparison ────────────────────────────────────
+    st.subheader("Before vs After — Policy Comparison")
+
+    base_val  = sc["baseline_return"]
+    new_val   = sim["dr_mean"]
+    delta_dr  = new_val - base_val
+    rev_str   = f"+{_fmt_revenue(sim['revenue_impact'])}"
+
+    left, arrow, right = st.columns([5, 1, 5])
+
+    left.markdown(
+        f"""<div style="background:#1a0a0a;border:1px solid #E50914;
+            border-radius:10px;padding:20px;">
+          <div style="color:#E50914;font-weight:700;margin-bottom:12px">
+            Current Policy (Baseline)
+          </div>
+          <table style="width:100%;font-size:0.9rem;color:#ccc;border-collapse:collapse">
+            <tr><td style="padding:5px 0;color:#aaa">DR Estimate</td>
+                <td style="padding:5px 0;font-weight:600">{base_val:.1f}</td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Revenue Impact</td>
+                <td style="padding:5px 0;font-weight:600">$0 (reference)</td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Risk</td>
+                <td style="padding:5px 0;font-weight:600">—</td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Confidence</td>
+                <td style="padding:5px 0;font-weight:600">—</td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Decision</td>
+                <td style="padding:5px 0;font-weight:600;color:#aaa">Active (live)</td></tr>
+          </table>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    arrow.markdown(
+        """<div style="display:flex;align-items:center;justify-content:center;
+            height:100%;font-size:2rem;color:#4A90E2;padding-top:55px">➜</div>""",
+        unsafe_allow_html=True,
+    )
+
+    right.markdown(
+        f"""<div style="background:#0a1a0a;border:1px solid #00A651;
+            border-radius:10px;padding:20px;">
+          <div style="color:#00A651;font-weight:700;margin-bottom:12px">
+            New Policy (Target)
+          </div>
+          <table style="width:100%;font-size:0.9rem;color:#ccc;border-collapse:collapse">
+            <tr><td style="padding:5px 0;color:#aaa">DR Estimate</td>
+                <td style="padding:5px 0;font-weight:600;color:#00A651">
+                  {new_val:.1f}
+                  <span style="font-size:0.75rem;color:#aaa"> (+{delta_dr:.1f})</span>
+                </td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Revenue Impact</td>
+                <td style="padding:5px 0;font-weight:600;color:#00A651">
+                  {rev_str}
+                  <span style="font-size:0.75rem;color:#aaa">
+                    (+{sim['improvement_pct']*100:.0f}%)
+                  </span>
+                </td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Risk</td>
+                <td style="padding:5px 0;font-weight:600;color:{sim['risk_color']}">
+                  {sim['risk_label']}
+                </td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Confidence</td>
+                <td style="padding:5px 0;font-weight:600;color:#4A90E2">
+                  {sim['confidence']:.0f}%
+                </td></tr>
+            <tr><td style="padding:5px 0;color:#aaa">Decision</td>
+                <td style="padding:5px 0;font-weight:600;color:{deploy_color}">
+                  {deploy_label}
+                </td></tr>
+          </table>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+
+    # ── segment CI chart ──────────────────────────────────────────────
+    st.subheader("Segment-level DR — Confidence Intervals")
+
+    seg_names = list(sim["seg_ci"].keys())
+    seg_est   = [sim["seg_ci"][s]["estimate"] for s in seg_names]
+    seg_lo    = [sim["seg_ci"][s]["ci_low"]   for s in seg_names]
+    seg_hi    = [sim["seg_ci"][s]["ci_high"]  for s in seg_names]
+    seg_bases = [sim["seg_ci"][s]["baseline"] for s in seg_names]
+    yerr = [
+        [e - l for e, l in zip(seg_est, seg_lo)],
+        [h - e for e, h in zip(seg_est, seg_hi)],
+    ]
+    fig, ax = plt.subplots(figsize=(6, 3), dpi=60)
+    ax.errorbar(seg_names, seg_est, yerr=yerr,
+                fmt="o", capsize=5, linewidth=1.5, markersize=8, color="#4A90E2")
+    for base in seg_bases:
+        ax.axhline(base, linestyle="--", linewidth=0.9, alpha=0.5, color="#aaa")
+    ax.set_title("Segment DR vs Baseline (95% CI)", fontsize=10)
+    ax.set_ylabel("Estimated Return")
+    ax.set_xlabel("Customer Segment")
+    plt.tight_layout()
+    st.pyplot(fig, clear_figure=True, use_container_width=False)
+
+    st.markdown("---")
+
+    # ── plain English summary ─────────────────────────────────────────
+    st.subheader("Plain English Summary")
+
+    summary = _plain_english(sim, scenario)
+    box_bg     = "#0a1a0a" if sim["gate_pass"] else "#1a0a0a"
+    box_border = "#00A651" if sim["gate_pass"] else "#E50914"
+    st.markdown(
+        f"""<div style="background:{box_bg};border-left:5px solid {box_border};
+            border-radius:6px;padding:20px;font-size:1.05rem;
+            line-height:1.75;color:#e0e0e0;">{summary}</div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── executive summary download ────────────────────────────────────
+    st.subheader("Export Executive Summary")
+
+    export_txt  = _export_text(sim, scenario, budget, risk_tol)
+    export_buf  = io.BytesIO(export_txt.encode("utf-8"))
+    export_name = f"ope_summary_{scenario.lower().replace(' ', '_')}.txt"
+
+    dl_col, prev_col = st.columns([1, 3])
+    with dl_col:
+        st.download_button(
+            label="Download Summary (.txt)",
+            data=export_buf,
+            file_name=export_name,
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with prev_col:
+        with st.expander("Preview export"):
+            st.code(export_txt, language="text")
+
+
+# ==============================================================================
+# OPE DASHBOARD  (original, unchanged)
+# ==============================================================================
+
+if page == "OPE Dashboard":
+    st.title("📊 Off-Policy Evaluation (OPE) Dashboard")
+    st.caption("IPS · WIS · DM · DR · Bootstrap CI · Policy Gate")
+    st.markdown("---")
+
+    # Sidebar
+    with st.sidebar:
+        st.header("📥 Inputs")
+        log_path   = st.text_input("Logged data (.npz)", "data/logged_behavior.npz")
+        model_path = st.text_input("Target policy (.pth)", "dqn_policy.pth")
+
+        st.header("⚙️ OPE Settings")
+        n_boot   = st.slider("Bootstrap samples", 200, 2000, 800, step=100)
+        clip_rho = st.slider("Importance weight clip (ρ)", 5.0, 200.0, 50.0, step=5.0)
+
+        st.header("🚦 Policy Gate")
+        baseline = st.number_input("Baseline return", value=0.0, step=10.0)
+        margin   = st.number_input("Safety margin",   value=0.0, step=10.0)
+
+        st.header("🧪 CQL Overlay")
+        use_cql   = st.checkbox("Compare against CQL", value=False)
+        cql_score = st.number_input("CQL score", value=0.0, step=10.0) if use_cql else None
+
+        run_btn = st.button("🚀 Run OPE")
+
+    # Cached execution
+    @st.cache_data(show_spinner=False)
+    def cached_run(log_path, model_path, n_boot, baseline, margin, clip_rho):
+        return run_ope(
+            log_path=log_path,
+            model_path=model_path,
+            n_boot=n_boot,
+            baseline=baseline,
+            margin=margin,
+            clip_rho=clip_rho,
+            quiet=True,
+        )
+
+    if run_btn:
+        with st.spinner("Running off-policy evaluation…"):
+            results = cached_run(log_path, model_path, n_boot, baseline, margin, clip_rho)
+
+        overall = results["overall"]
+        seg_ci  = results["segment"]
+        rollout = results["rollout"]
+
+        # Deployment Decision Badge
+        dr          = overall["DR"]
+        deploy_pass = dr["ci_low"] >= baseline + margin
+
+        if deploy_pass:
+            st.success("✅ **Deployment decision: PASS** — DR lower bound clears safety gate.")
+        else:
+            st.error("⛔ **Deployment decision: HOLD** — DR lower bound below safety gate.")
+
+        st.markdown("---")
+
+        # Key Metrics
+        st.subheader("📌 Overall OPE Estimates")
+        cols = st.columns(4)
+        for col, key in zip(cols, ["IPS", "WIS", "DM", "DR"]):
+            v = overall[key]
+            col.metric(label=key, value=f"{v['estimate']:.2f}",
+                       delta=f"[{v['ci_low']:.2f}, {v['ci_high']:.2f}]")
+
+        st.caption(
+            f"Episodes={results['meta']['episodes']} · "
+            f"ρ_clip={results['meta']['clip_rho']} · "
+            f"baseline={baseline} · margin={margin}"
+        )
+        st.markdown("---")
+
+        # Segment CI
+        st.subheader("📊 Segment-wise Confidence Intervals")
+        st.pyplot(ci_bar_plot(seg_ci, baseline, cql_score),
+                  clear_figure=True, use_container_width=False)
+        st.markdown("---")
+
+        # Rollout Guidance
+        st.subheader("🧭 Partial Rollout Recommendations")
+        rows = []
+        for seg in seg_ci:
+            rows.append({
+                "Segment":          seg,
+                "DR Mean":          seg_ci[seg]["estimate"],
+                "CI Low":           seg_ci[seg]["ci_low"],
+                "CI High":          seg_ci[seg]["ci_high"],
+                "Gate":             "PASS" if seg_ci[seg]["ci_low"] >= baseline + margin else "HOLD",
+                "Suggested Rollout": rollout[seg]["rollout"],
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.info("Gate rule: **PASS if CI_low ≥ baseline + margin**")
+        st.markdown("---")
+
+        # Sample Distributions
+        st.subheader("📈 OPE Sample Distributions")
+        st.pyplot(
+            dist_plot({
+                "IPS": overall["IPS"]["samples"],
+                "WIS": overall["WIS"]["samples"],
+                "DM":  overall["DM"]["samples"],
+                "DR":  overall["DR"]["samples"],
+            }),
+            clear_figure=True, use_container_width=False,
+        )
+        st.markdown("---")
+
+        # CQL vs DR
+        st.subheader("🧪 CQL vs OPE DR")
+        if use_cql:
+            st.write(
+                f"**CQL score:** {cql_score:.2f}\n\n"
+                f"**OPE DR:** {dr['estimate']:.2f} "
+                f"(CI [{dr['ci_low']:.2f}, {dr['ci_high']:.2f}])"
+            )
+            if dr["ci_low"] > cql_score:
+                st.success("DR lower bound exceeds CQL → policy stronger than conservative offline baseline.")
+            else:
+                st.warning("DR lower bound below CQL → conservative baseline still safer.")
+        else:
+            st.info("Enable CQL overlay to compare conservative offline baseline.")
+
+    else:
+        st.info("⬅️ Configure inputs and click **Run OPE**.")
