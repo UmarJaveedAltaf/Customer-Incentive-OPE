@@ -6,7 +6,243 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
-from analysis_ope import run_ope
+# ── pure-numpy OPE runner — no torch / no DQN dependency ──────────────────────
+
+import os as _os
+
+def _arr_f32(x) -> np.ndarray:
+    a = np.asarray(x)
+    if a.dtype == object:
+        try:    a = np.stack(a, axis=0)
+        except: a = np.asarray(list(a))
+    return a.astype(np.float32)
+
+
+def _arr_i64(x) -> np.ndarray:
+    a = np.asarray(x)
+    if a.dtype == object:
+        try:    a = np.stack(a, axis=0)
+        except: a = np.asarray(list(a))
+    return a.astype(np.int64).reshape(-1)
+
+
+def _bootstrap_ci(values: np.ndarray, n_boot: int, seed: int) -> dict:
+    rng = np.random.default_rng(seed)
+    v   = np.asarray(values, dtype=np.float32)
+    n   = len(v)
+    est = float(v.mean()) if n > 0 else float("nan")
+    boots = np.array(
+        [v[rng.integers(0, n, size=n)].mean() for _ in range(n_boot)],
+        dtype=np.float32,
+    )
+    return {
+        "estimate": est,
+        "ci_low":   float(np.percentile(boots, 2.5))  if n > 0 else float("nan"),
+        "ci_high":  float(np.percentile(boots, 97.5)) if n > 0 else float("nan"),
+        "details":  {"n": n, "n_boot": n_boot},
+        "samples":  v,
+    }
+
+
+def _ips_ep(r, pi_t, b_t, clip_rho):
+    rho = np.clip(pi_t / np.clip(b_t, 1e-8, 1.0), 0.0, clip_rho)
+    return float(np.sum(rho * r))
+
+
+def _wis_ep(r, pi_t, b_t, clip_rho):
+    rho = np.clip(pi_t / np.clip(b_t, 1e-8, 1.0), 0.0, clip_rho)
+    return float(np.sum(rho * r) / (np.sum(rho) + 1e-8))
+
+
+def _dm_ep(pi_all, rhat):
+    return float(np.sum(np.sum(pi_all * rhat, axis=1)))
+
+
+def _dr_ep(actions, r, pi_all, pi_t, b_t, rhat, clip_rho):
+    rho   = np.clip(pi_t / np.clip(b_t, 1e-8, 1.0), 0.0, clip_rho)
+    exp_q = np.sum(pi_all * rhat, axis=1)
+    q_t   = rhat[np.arange(len(actions)), actions]
+    return float(np.sum(exp_q + rho * (r - q_t)))
+
+
+def _seg_masks(states):
+    return {
+        "Low":    states[:, 0] == 1,
+        "Medium": states[:, 1] == 1,
+        "High":   states[:, 2] == 1,
+    }
+
+
+def _gate(ci_low, baseline, margin):
+    return bool(ci_low >= baseline + margin)
+
+
+def _rollout_recs(seg_ci, baseline, margin):
+    recs = {}
+    for seg, res in seg_ci.items():
+        if res["details"]["n"] == 0:
+            recs[seg] = {"decision": "NO DATA", "rollout": "0%",
+                         "reason": "No samples in this segment."}
+            continue
+        passed = _gate(res["ci_low"], baseline, margin)
+        if passed:
+            uplift = res["ci_low"] - baseline
+            pct    = "50%" if uplift > 200 else ("25%" if uplift > 100 else "10%")
+            recs[seg] = {"decision": "PASS", "rollout": pct,
+                         "reason": f"CI low ({res['ci_low']:.2f}) ≥ baseline+margin."}
+        else:
+            recs[seg] = {"decision": "HOLD", "rollout": "0%",
+                         "reason": f"CI low ({res['ci_low']:.2f}) < baseline+margin."}
+    return recs
+
+
+def run_ope(log_path, model_path, n_boot, baseline, margin, clip_rho, quiet=True):
+    """
+    Pure-numpy/sklearn OPE runner — no torch required.
+
+    Target policy probabilities are sourced in priority order:
+      1. Pre-saved 'pi_probs' / 'pi_probs_all' keys inside the .npz
+      2. Greedy policy derived from a Ridge reward model trained on the data
+    """
+    from sklearn.linear_model import Ridge
+
+    if not _os.path.exists(log_path):
+        raise FileNotFoundError(f"Logged data not found: {log_path}")
+
+    data     = np.load(log_path, allow_pickle=True)
+    raw      = {k: list(data[k]) for k in data.files}
+    n_eps    = len(raw.get("states", []))
+    if n_eps == 0:
+        raise ValueError("No episodes found in logged data.")
+
+    # ── load & normalise per-episode arrays ───────────────────────────────────
+    S  = [_arr_f32(raw["states"][i])               for i in range(n_eps)]
+    A  = [_arr_i64(raw["actions"][i])              for i in range(n_eps)]
+    R  = [_arr_f32(raw["rewards"][i]).reshape(-1)  for i in range(n_eps)]
+    BT = [_arr_f32(raw["b_probs"][i]).reshape(-1)  for i in range(n_eps)]
+
+    state_dim  = S[0].shape[1]
+    action_dim = _arr_f32(raw["b_probs_all"][0]).shape[1]
+    n_act      = action_dim
+
+    # ── Ridge reward model (featurise as [state | one_hot(action)]) ───────────
+    flat_s = np.concatenate(S,  axis=0)
+    flat_a = np.concatenate(A,  axis=0)
+    flat_r = np.concatenate(R,  axis=0)
+
+    a_oh = np.zeros((len(flat_a), n_act), dtype=np.float32)
+    a_oh[np.arange(len(flat_a)), flat_a] = 1.0
+    X_tr = np.concatenate([flat_s, a_oh], axis=1).astype(np.float64)
+
+    rmodel = Ridge(alpha=1.0)
+    rmodel.fit(X_tr, flat_r.astype(np.float64))
+
+    def _rhat_all(states: np.ndarray) -> np.ndarray:
+        T   = states.shape[0]
+        out = np.zeros((T, n_act), dtype=np.float32)
+        for act in range(n_act):
+            oh        = np.zeros((T, n_act), dtype=np.float32)
+            oh[:, act] = 1.0
+            X         = np.concatenate([states.astype(np.float64),
+                                         oh.astype(np.float64)], axis=1)
+            out[:, act] = rmodel.predict(X).astype(np.float32)
+        return out
+
+    # ── target policy probabilities ───────────────────────────────────────────
+    has_pi = (
+        "pi_probs"     in raw and
+        "pi_probs_all" in raw and
+        raw["pi_probs"][0] is not None
+    )
+
+    if has_pi:
+        PT = [_arr_f32(raw["pi_probs"][i]).reshape(-1) for i in range(n_eps)]
+        PA = [_arr_f32(raw["pi_probs_all"][i])          for i in range(n_eps)]
+    else:
+        # Greedy one-hot from reward model argmax
+        PT, PA = [], []
+        for i in range(n_eps):
+            rh      = _rhat_all(S[i])
+            greedy  = np.argmax(rh, axis=1)
+            pi_oh   = np.zeros_like(rh)
+            pi_oh[np.arange(len(greedy)), greedy] = 1.0
+            PA.append(pi_oh)
+            PT.append(pi_oh[np.arange(len(A[i])), A[i]])
+
+    # ── per-episode estimators ────────────────────────────────────────────────
+    ips_v, wis_v, dm_v, dr_v = [], [], [], []
+    seg_dr   = {"Low": [], "Medium": [], "High": []}
+    seg_epid = []
+
+    for i in range(n_eps):
+        s, a, r, bt, pt, pa = S[i], A[i], R[i], BT[i], PT[i], PA[i]
+        rh = _rhat_all(s)
+
+        seg_epid.append(int(np.argmax(s[0, :3])))
+
+        ips_v.append(_ips_ep(r, pt, bt, clip_rho))
+        wis_v.append(_wis_ep(r, pt, bt, clip_rho))
+        dm_v .append(_dm_ep(pa, rh))
+        dr_v .append(_dr_ep(a, r, pa, pt, bt, rh, clip_rho))
+
+        for seg, mask in _seg_masks(s).items():
+            if mask.sum() == 0:
+                continue
+            seg_dr[seg].append(
+                _dr_ep(a[mask], r[mask], pa[mask], pt[mask], bt[mask],
+                       rh[mask], clip_rho)
+            )
+
+    # ── bootstrap CIs ─────────────────────────────────────────────────────────
+    res_ips = _bootstrap_ci(np.array(ips_v), n_boot, seed=0)
+    res_wis = _bootstrap_ci(np.array(wis_v), n_boot, seed=1)
+    res_dm  = _bootstrap_ci(np.array(dm_v),  n_boot, seed=2)
+    res_dr  = _bootstrap_ci(np.array(dr_v),  n_boot, seed=3)
+
+    seg_ci = {
+        seg: _bootstrap_ci(np.array(vals, dtype=np.float32), n_boot, seed=10 + j)
+        for j, (seg, vals) in enumerate(seg_dr.items())
+    }
+
+    # ── gate + rollout ────────────────────────────────────────────────────────
+    gate = {
+        seg: {"pass": _gate(res["ci_low"], baseline, margin),
+              "baseline": float(baseline), "margin": float(margin)}
+        for seg, res in seg_ci.items()
+    }
+    recs = _rollout_recs(seg_ci, baseline, margin)
+
+    return {
+        "overall":  {"IPS": res_ips, "WIS": res_wis, "DM": res_dm, "DR": res_dr},
+        "segment":  seg_ci,
+        "gate":     gate,
+        "rollout":  recs,
+        "meta": {
+            "episodes":   n_eps,
+            "state_dim":  state_dim,
+            "action_dim": action_dim,
+            "clip_rho":   float(clip_rho),
+            "baseline":   float(baseline),
+            "margin":     float(margin),
+            "gate_value": float(baseline + margin),
+            "n_boot":     int(n_boot),
+            "log_path":   log_path,
+            "model_path": model_path,
+        },
+        "episode_samples": {
+            "IPS": np.array(ips_v, dtype=np.float32),
+            "WIS": np.array(wis_v, dtype=np.float32),
+            "DM":  np.array(dm_v,  dtype=np.float32),
+            "DR":  np.array(dr_v,  dtype=np.float32),
+        },
+        "segments_episode": np.array(seg_epid, dtype=np.int64),
+        "dr_by_segment": {
+            "Low":    np.array(seg_dr["Low"],    dtype=np.float32),
+            "Medium": np.array(seg_dr["Medium"], dtype=np.float32),
+            "High":   np.array(seg_dr["High"],   dtype=np.float32),
+        },
+        "rollout_sim": {"available": True},
+    }
 
 
 # =============================
